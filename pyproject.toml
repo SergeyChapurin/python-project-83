@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "hexlet-code"
+version = "0.1.0"
+description = "Page Analyzer is a site that analyzes websites for SEO suitability."
+authors = ["Sergey Chapurin <goodwin7@list.ru>"]
+readme = "README.md"
+packages = [{include = "page_analyzer"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+flask = "^3.0.3"
+python-dotenv = "^1.0.1"
+gunicorn = "^22.0.0"
+
+
+[tool.poetry.group.dev.dependencies]
+flake8 = "^7.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
