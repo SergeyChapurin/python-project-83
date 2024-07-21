@@ -13,6 +13,7 @@ from psycopg2.extras import NamedTupleCursor
 import validators
 from urllib.parse import urlparse
 from datetime import datetime
+import requests
 
 
 load_dotenv()
@@ -107,11 +108,17 @@ def show_urls():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=NamedTupleCursor)
     cur.execute(
-        'SELECT urls.id, urls.name, MAX(url_checks.created_at) AS last_check '
-        'FROM urls '
-        'LEFT JOIN url_checks ON urls.id = url_checks.url_id '
-        'GROUP BY urls.id '
-        'ORDER BY urls.id DESC'
+        '''
+        SELECT DISTINCT ON (urls.id)
+            urls.id, 
+            urls.name, 
+            MAX(url_checks.created_at) AS last_check, 
+            url_checks.status_code
+        FROM urls
+        LEFT JOIN url_checks ON urls.id = url_checks.url_id
+        GROUP BY urls.id, urls.name, url_checks.status_code
+        ORDER BY urls.id DESC
+        '''
     )
     urls = cur.fetchall()
     cur.close()
@@ -123,16 +130,26 @@ def show_urls():
 def add_check(id):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=NamedTupleCursor)
-    created_at = datetime.now()
-    cur.execute(
-        'INSERT INTO url_checks (url_id, created_at) VALUES (%s, %s)',
-        (id, created_at)
-    )
-    conn.commit()
+    cur.execute('SELECT name FROM urls WHERE id = %s', (id,))
+    url = cur.fetchone()
+
+    try:
+        response = requests.get(url.name)
+        response.raise_for_status()
+        status_code = response.status_code
+        created_at = datetime.now()
+        cur.execute(
+            'INSERT INTO url_checks (url_id, status_code, created_at) VALUES (%s, %s, %s)',
+            (id, status_code, created_at)
+        )
+        conn.commit()
+        flash('Страница успешно проверена', 'success')
+    except requests.RequestException:
+        flash('Произошла ошибка при проверке', 'danger')
+
     cur.close()
     conn.close()
-    flash('Страница успешно проверена', 'success')
-    return redirect(url_for('show_url', id=id, created_at=created_at))
+    return redirect(url_for('show_url', id=id))
 
 
 if __name__ == '__main__':
