@@ -12,6 +12,7 @@ import psycopg2
 from psycopg2.extras import NamedTupleCursor
 import validators
 from urllib.parse import urlparse
+from datetime import datetime
 
 
 load_dotenv()
@@ -59,19 +60,19 @@ def add_url():
 
     url = normalize(url)
     conn = get_db_connection()
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=NamedTupleCursor)
     cur.execute('SELECT * FROM urls WHERE name = %s', (url,))
     existing_url = cur.fetchone()
 
     if existing_url:
         flash('Страница уже существует', 'info')
-        url_id = existing_url[0]
+        url_id = existing_url.id
     else:
         cur.execute(
             'INSERT INTO urls (name) VALUES (%s) RETURNING id',
             (url,)
         )
-        url_id = cur.fetchone()[0]
+        url_id = cur.fetchone().id
         conn.commit()
         flash('Страница успешно добавлена', 'success')
 
@@ -83,7 +84,7 @@ def add_url():
 @app.route('/urls/<int:id>')
 def show_url(id):
     conn = get_db_connection()
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=NamedTupleCursor)
     cur.execute(
         'SELECT id, name, created_at FROM urls WHERE id = %s',
         (id,)
@@ -91,9 +92,14 @@ def show_url(id):
     url = cur.fetchone()
     if url is None:
         return render_template('error/404.html'), 404
+    cur.execute(
+        'SELECT * FROM url_checks WHERE url_id = %s ORDER BY id DESC',
+        (id,)
+    )
+    checks = cur.fetchall()
     cur.close()
     conn.close()
-    return render_template('url.html', url=url)
+    return render_template('url.html', url=url, checks=checks)
 
 
 @app.route('/urls')
@@ -101,12 +107,32 @@ def show_urls():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=NamedTupleCursor)
     cur.execute(
-        'SELECT id, name FROM urls ORDER BY id DESC'
+        'SELECT urls.id, urls.name, MAX(url_checks.created_at) AS last_check '
+        'FROM urls '
+        'LEFT JOIN url_checks ON urls.id = url_checks.url_id '
+        'GROUP BY urls.id '
+        'ORDER BY urls.id DESC'
     )
     urls = cur.fetchall()
     cur.close()
     conn.close()
     return render_template('urls.html', urls=urls)
+
+
+@app.route('/urls/<int:id>/checks', methods=['POST'])
+def add_check(id):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=NamedTupleCursor)
+    created_at = datetime.now()
+    cur.execute(
+        'INSERT INTO url_checks (url_id, created_at) VALUES (%s, %s)',
+        (id, created_at)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    flash('Страница успешно проверена', 'success')
+    return redirect(url_for('show_url', id=id, created_at=created_at))
 
 
 if __name__ == '__main__':

@@ -23,6 +23,7 @@
             <td>
               <a href="{{ url_for('show_url', id=url.id) }}">{{ url.name }}</a>
             </td>
+            <td>{{ url.last_check }}</td>
 
           </tr>
       {% endfor %}
