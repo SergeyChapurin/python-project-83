@@ -5,15 +5,23 @@ from flask import (
     redirect,
     url_for,
     flash,
-    get_flashed_messages)
+    get_flashed_messages,
+    abort
+)
 from dotenv import load_dotenv
 import os
-import psycopg2
-from psycopg2.extras import NamedTupleCursor
-import validators
-from urllib.parse import urlparse
 from datetime import datetime
 import requests
+from page_analyzer.utils import validate, normalize, parse_url
+from page_analyzer.db import (
+    get_db_connection,
+    get_url_by_name,
+    insert_url,
+    get_url_by_id,
+    get_url_checks,
+    get_all_urls,
+    add_url_check
+)
 
 
 load_dotenv()
@@ -21,26 +29,6 @@ load_dotenv()
 app = Flask(__name__)
 
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
-DATABASE_URL = os.getenv('DATABASE_URL')
-
-
-def validate(url):
-    errors = []
-    if not validators.url(url):
-        errors.append('Некорректный URL')
-    elif len(url) > 255:
-        errors.append('URL превышает 255 символов')
-    return errors
-
-
-def normalize(url):
-    normalized_url = urlparse(url)
-    return f"{normalized_url.scheme}://{normalized_url.netloc}"
-
-
-def get_db_connection():
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
 
 
 @app.route("/")
@@ -61,23 +49,16 @@ def add_url():
 
     url = normalize(url)
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=NamedTupleCursor)
-    cur.execute('SELECT * FROM urls WHERE name = %s', (url,))
-    existing_url = cur.fetchone()
+    existing_url = get_url_by_name(conn, url)
 
     if existing_url:
         flash('Страница уже существует', 'info')
         url_id = existing_url.id
     else:
-        cur.execute(
-            'INSERT INTO urls (name) VALUES (%s) RETURNING id',
-            (url,)
-        )
-        url_id = cur.fetchone().id
+        url_id = insert_url(conn, url).id
         conn.commit()
         flash('Страница успешно добавлена', 'success')
 
-    cur.close()
     conn.close()
     return redirect(url_for('show_url', id=url_id))
 
@@ -85,20 +66,13 @@ def add_url():
 @app.route('/urls/<int:id>')
 def show_url(id):
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=NamedTupleCursor)
-    cur.execute(
-        'SELECT id, name, created_at FROM urls WHERE id = %s',
-        (id,)
-    )
-    url = cur.fetchone()
+    url = get_url_by_id(conn, id)
+
     if url is None:
-        return render_template('error/404.html'), 404
-    cur.execute(
-        'SELECT * FROM url_checks WHERE url_id = %s ORDER BY id DESC',
-        (id,)
-    )
-    checks = cur.fetchall()
-    cur.close()
+        conn.close()
+        abort(404)
+
+    checks = get_url_checks(conn, id)
     conn.close()
     return render_template('url.html', url=url, checks=checks)
 
@@ -106,22 +80,7 @@ def show_url(id):
 @app.route('/urls')
 def show_urls():
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=NamedTupleCursor)
-    cur.execute(
-        '''
-        SELECT DISTINCT ON (urls.id)
-            urls.id, 
-            urls.name, 
-            MAX(url_checks.created_at) AS last_check, 
-            url_checks.status_code
-        FROM urls
-        LEFT JOIN url_checks ON urls.id = url_checks.url_id
-        GROUP BY urls.id, urls.name, url_checks.status_code
-        ORDER BY urls.id DESC
-        '''
-    )
-    urls = cur.fetchall()
-    cur.close()
+    urls = get_all_urls(conn)
     conn.close()
     return render_template('urls.html', urls=urls)
 
@@ -129,27 +88,32 @@ def show_urls():
 @app.route('/urls/<int:id>/checks', methods=['POST'])
 def add_check(id):
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=NamedTupleCursor)
-    cur.execute('SELECT name FROM urls WHERE id = %s', (id,))
-    url = cur.fetchone()
+    url = get_url_by_id(conn, id)
 
     try:
         response = requests.get(url.name)
         response.raise_for_status()
-        status_code = response.status_code
-        created_at = datetime.now()
-        cur.execute(
-            'INSERT INTO url_checks (url_id, status_code, created_at) VALUES (%s, %s, %s)',
-            (id, status_code, created_at)
-        )
-        conn.commit()
-        flash('Страница успешно проверена', 'success')
     except requests.RequestException:
         flash('Произошла ошибка при проверке', 'danger')
+        conn.close()
+        return redirect(url_for('show_url', id=id))
 
-    cur.close()
+    status_code, h1, title, description = parse_url(response)
+    created_at = datetime.now()
+    add_url_check(conn, id, status_code, h1, title, description, created_at)
     conn.close()
+    flash('Страница успешно проверена', 'success')
     return redirect(url_for('show_url', id=id))
+
+
+@app.errorhandler(404)
+def url_not_found(e):
+    return render_template('404.html'), 404
+
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    return render_template('500.html'), 500
 
 
 if __name__ == '__main__':
